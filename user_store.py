@@ -253,6 +253,16 @@ def _ensure_balance_row(user_id: int, conn: sqlite3.Connection) -> None:
     )
 
 
+def register_user(user_id: int) -> None:
+    """Register a user the first time they interact with the bot.
+    Safe to call on every interaction — INSERT OR IGNORE makes it a no-op
+    for existing users. Ensures every user appears in /userlist even if
+    they never buy tokens.
+    """
+    with _conn() as c:
+        _ensure_balance_row(user_id, c)
+
+
 def get_balance(user_id: int) -> int:
     """Return current token balance for a user."""
     with _conn() as c:
