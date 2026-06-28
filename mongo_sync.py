@@ -5,9 +5,10 @@ Mirrors critical bot state to MongoDB so data survives restarts and
 redeploys on any platform (Render, Replit, Docker, etc.).
 
 Behaviour:
-  • All saves are fire-and-forget (non-blocking background thread).
-  • Restores run once on startup and only populate SQLite if the local
-    tables are empty — safe on first deploy, harmless on restart.
+  • All saves run in non-daemon background threads so they complete even
+    during a graceful shutdown (SIGTERM on Render gives ~30 s grace).
+  • Restores run once on startup and populate SQLite from MongoDB — merging
+    any missing rows so a partial local DB is always topped up from the cloud.
   • Entire module degrades gracefully when MONGODB_URL is not set.
 
 Collections used:
@@ -59,7 +60,7 @@ def _try_connect() -> bool:
         _client  = client
         _db      = client[db_name]
         _enabled = True
-        logger.info("mongo_sync: connected — db=%s", db_name)
+        logger.warning("mongo_sync: connected — db=%s", db_name)
         return True
     except Exception as e:
         logger.warning("mongo_sync: connection failed — %s", e)
@@ -75,8 +76,8 @@ def _col(name: str):
 
 
 def _bg(fn):
-    """Fire-and-forget: run fn in a daemon thread — never blocks the caller."""
-    threading.Thread(target=fn, daemon=True).start()
+    """Run fn in a non-daemon background thread so it survives SIGTERM grace period."""
+    threading.Thread(target=fn, daemon=False).start()
 
 
 # ── Settings (key/value) ──────────────────────────────────────────────────────
@@ -93,7 +94,7 @@ def save_setting(key: str, value) -> None:
                 upsert=True,
             )
         except Exception as e:
-            logger.debug("mongo_sync.save_setting error: %s", e)
+            logger.warning("mongo_sync.save_setting error: %s", e)
     _bg(_do)
 
 
@@ -130,7 +131,7 @@ def sync_user_balance(user_id: int, balance: int, total_bought: int,
                 upsert=True,
             )
         except Exception as e:
-            logger.debug("mongo_sync.sync_user_balance error: %s", e)
+            logger.warning("mongo_sync.sync_user_balance error (uid=%s): %s", user_id, e)
     _bg(_do)
 
 
@@ -169,7 +170,7 @@ def sync_user_proxies(user_id: int, proxies: list) -> None:
                 upsert=True,
             )
         except Exception as e:
-            logger.debug("mongo_sync.sync_user_proxies error: %s", e)
+            logger.warning("mongo_sync.sync_user_proxies error (uid=%s): %s", user_id, e)
     _bg(_do)
 
 
@@ -190,10 +191,7 @@ def load_all_user_proxies() -> dict:
 # ── Admin proxy pool ──────────────────────────────────────────────────────────
 
 def sync_proxy_pool(proxies: list) -> None:
-    """Async: replace the full admin proxy pool in MongoDB.
-    proxies = list of dicts with keys: url, added_at, fail_count, last_fail,
-              last_ok, avg_latency.
-    """
+    """Async: replace the full admin proxy pool in MongoDB."""
     if not _enabled:
         return
     def _do():
@@ -203,7 +201,7 @@ def sync_proxy_pool(proxies: list) -> None:
             if proxies:
                 col.insert_many(proxies)
         except Exception as e:
-            logger.debug("mongo_sync.sync_proxy_pool error: %s", e)
+            logger.warning("mongo_sync.sync_proxy_pool error: %s", e)
     _bg(_do)
 
 
@@ -241,7 +239,7 @@ def sync_proxy_sources(sources: list) -> None:
             if sources:
                 col.insert_many([{"url": s} for s in sources])
         except Exception as e:
-            logger.debug("mongo_sync.sync_proxy_sources error: %s", e)
+            logger.warning("mongo_sync.sync_proxy_sources error: %s", e)
     _bg(_do)
 
 

@@ -113,7 +113,7 @@ def _init() -> None:
 # ── MongoDB sync helpers ───────────────────────────────────────────────────────
 
 def _sync_balance_to_mongo(user_id: int) -> None:
-    """Read current balance from SQLite and mirror it to MongoDB (fire-and-forget)."""
+    """Read current balance from SQLite and mirror it to MongoDB (background thread)."""
     if not _msync or not _msync.is_enabled():
         return
     try:
@@ -126,11 +126,11 @@ def _sync_balance_to_mongo(user_id: int) -> None:
         if row:
             _msync.sync_user_balance(user_id, row[0], row[1], row[2], row[3])
     except Exception as e:
-        logger.debug("_sync_balance_to_mongo error: %s", e)
+        logger.warning("_sync_balance_to_mongo error (uid=%s): %s", user_id, e)
 
 
 def _sync_proxies_to_mongo(user_id: int) -> None:
-    """Read current proxy list from SQLite and mirror it to MongoDB (fire-and-forget)."""
+    """Read current proxy list from SQLite and mirror it to MongoDB (background thread)."""
     if not _msync or not _msync.is_enabled():
         return
     try:
@@ -141,49 +141,55 @@ def _sync_proxies_to_mongo(user_id: int) -> None:
             ).fetchall()
         _msync.sync_user_proxies(user_id, [r[0] for r in rows])
     except Exception as e:
-        logger.debug("_sync_proxies_to_mongo error: %s", e)
+        logger.warning("_sync_proxies_to_mongo error (uid=%s): %s", user_id, e)
 
 
 def _restore_from_mongo() -> None:
-    """Restore SQLite from MongoDB when local tables are empty (fresh deploy)."""
+    """Merge MongoDB data into SQLite on startup.
+
+    Always runs regardless of whether SQLite has rows — uses INSERT OR IGNORE
+    so existing local rows are never overwritten, but any rows present in
+    MongoDB that are missing locally (e.g. after a partial crash) are added.
+    This guarantees data is never lost just because SQLite had one stale row.
+    """
     if not _msync or not _msync.is_enabled():
+        logger.warning("mongo_sync: skipping restore — MongoDB not connected")
         return
     try:
-        with _conn() as c:
-            bal_count = c.execute("SELECT COUNT(*) FROM token_balances").fetchone()[0]
-            prx_count = c.execute("SELECT COUNT(*) FROM user_proxies").fetchone()[0]
+        # ── Token balances ────────────────────────────────────────────────
+        rows = _msync.load_all_balances()
+        if rows:
+            with _conn() as c:
+                for r in rows:
+                    c.execute(
+                        "INSERT OR IGNORE INTO token_balances "
+                        "(user_id, balance, total_bought, total_spent, first_seen, updated_at) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (r["user_id"], r["balance"], r["total_bought"],
+                         r["total_spent"], r["first_seen"], r.get("updated_at", 0))
+                    )
+            logger.warning("mongo_sync: merged %d user balance(s) from MongoDB", len(rows))
+        else:
+            logger.warning("mongo_sync: no balance records found in MongoDB to restore")
 
-        if bal_count == 0:
-            rows = _msync.load_all_balances()
-            if rows:
-                with _conn() as c:
-                    for r in rows:
-                        c.execute(
-                            "INSERT OR IGNORE INTO token_balances "
-                            "(user_id, balance, total_bought, total_spent, first_seen, updated_at) "
-                            "VALUES (?,?,?,?,?,?)",
-                            (r["user_id"], r["balance"], r["total_bought"],
-                             r["total_spent"], r["first_seen"], r.get("updated_at", 0))
-                        )
-                logger.info("mongo_sync: restored %d user balances", len(rows))
-
-        if prx_count == 0:
-            all_proxies = _msync.load_all_user_proxies()
-            if all_proxies:
-                now = time.time()
-                with _conn() as c:
-                    for uid, proxies in all_proxies.items():
-                        for url in proxies:
-                            try:
-                                c.execute(
-                                    "INSERT OR IGNORE INTO user_proxies (user_id, url, added_at) "
-                                    "VALUES (?,?,?)",
-                                    (uid, url, now)
-                                )
-                            except Exception:
-                                pass
-                total = sum(len(v) for v in all_proxies.values())
-                logger.info("mongo_sync: restored %d user proxies", total)
+        # ── User proxies ──────────────────────────────────────────────────
+        all_proxies = _msync.load_all_user_proxies()
+        if all_proxies:
+            now = time.time()
+            total = 0
+            with _conn() as c:
+                for uid, proxies in all_proxies.items():
+                    for url in proxies:
+                        try:
+                            c.execute(
+                                "INSERT OR IGNORE INTO user_proxies (user_id, url, added_at) "
+                                "VALUES (?,?,?)",
+                                (uid, url, now)
+                            )
+                            total += 1
+                        except Exception:
+                            pass
+            logger.warning("mongo_sync: merged %d user proxy record(s) from MongoDB", total)
     except Exception as e:
         logger.warning("_restore_from_mongo error: %s", e)
 

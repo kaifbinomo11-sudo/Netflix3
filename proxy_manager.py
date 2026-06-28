@@ -171,44 +171,42 @@ class ProxyManager:
         self._restore_from_mongo()
 
     def _restore_from_mongo(self) -> None:
-        """Restore proxy pool and sources from MongoDB when SQLite is empty."""
+        """Merge proxy pool and sources from MongoDB into SQLite on startup.
+
+        Always runs — uses INSERT OR IGNORE so existing local rows are kept
+        but any rows missing locally are added from MongoDB.
+        """
         if not _msync or not _msync.is_enabled():
             return
         try:
-            with _get_conn() as conn:
-                pool_count = conn.execute("SELECT COUNT(*) FROM proxies").fetchone()[0]
-                src_count  = conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0]
+            rows = _msync.load_proxy_pool()
+            if rows:
+                with _get_conn() as conn:
+                    for r in rows:
+                        try:
+                            conn.execute(
+                                "INSERT OR IGNORE INTO proxies "
+                                "(url, added_at, fail_count, last_fail, last_ok, avg_latency) "
+                                "VALUES (?,?,?,?,?,?)",
+                                (r["url"], r.get("added_at", 0), r.get("fail_count", 0),
+                                 r.get("last_fail", 0), r.get("last_ok", 0), r.get("avg_latency"))
+                            )
+                        except Exception:
+                            pass
+                logger.warning("mongo_sync: merged %d admin proxy record(s) from MongoDB", len(rows))
 
-            if pool_count == 0:
-                rows = _msync.load_proxy_pool()
-                if rows:
-                    with _get_conn() as conn:
-                        for r in rows:
-                            try:
-                                conn.execute(
-                                    "INSERT OR IGNORE INTO proxies "
-                                    "(url, added_at, fail_count, last_fail, last_ok, avg_latency) "
-                                    "VALUES (?,?,?,?,?,?)",
-                                    (r["url"], r.get("added_at", 0), r.get("fail_count", 0),
-                                     r.get("last_fail", 0), r.get("last_ok", 0), r.get("avg_latency"))
-                                )
-                            except Exception:
-                                pass
-                    logger.info("mongo_sync: restored %d admin proxies", len(rows))
-
-            if src_count == 0:
-                sources = _msync.load_proxy_sources()
-                if sources:
-                    with _get_conn() as conn:
-                        for url in sources:
-                            try:
-                                conn.execute(
-                                    "INSERT OR IGNORE INTO sources (url, added_at) VALUES (?,?)",
-                                    (url, time.time())
-                                )
-                            except Exception:
-                                pass
-                    logger.info("mongo_sync: restored %d proxy sources", len(sources))
+            sources = _msync.load_proxy_sources()
+            if sources:
+                with _get_conn() as conn:
+                    for url in sources:
+                        try:
+                            conn.execute(
+                                "INSERT OR IGNORE INTO sources (url, added_at) VALUES (?,?)",
+                                (url, time.time())
+                            )
+                        except Exception:
+                            pass
+                logger.warning("mongo_sync: merged %d proxy source(s) from MongoDB", len(sources))
         except Exception as e:
             logger.warning("ProxyManager._restore_from_mongo error: %s", e)
 
