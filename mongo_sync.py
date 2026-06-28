@@ -39,7 +39,16 @@ def _try_connect() -> bool:
     global _client, _db, _enabled
     url = os.environ.get("MONGODB_URL", "").strip()
     if not url:
+        logger.warning("mongo_sync: MONGODB_URL is not set — MongoDB disabled")
         return False
+
+    # Redact credentials for safe logging: show only scheme + host
+    try:
+        _safe = re.sub(r'(mongodb(?:\+srv)?://)([^@]+@)', r'\1***:***@', url)
+    except Exception:
+        _safe = "<url>"
+    logger.warning("mongo_sync: connecting to %s …", _safe)
+
     try:
         import pymongo
         m = re.match(r'(mongodb(?:\+srv)?://[^:]+:)(.+?)(@[^@]+$)', url)
@@ -62,8 +71,22 @@ def _try_connect() -> bool:
         _enabled = True
         logger.warning("mongo_sync: connected — db=%s", db_name)
         return True
+    except ImportError:
+        logger.warning("mongo_sync: pymongo is not installed — run: pip install pymongo")
+        return False
     except Exception as e:
-        logger.warning("mongo_sync: connection failed — %s", e)
+        err = str(e)
+        logger.warning("mongo_sync: connection failed — %s", err)
+        if "Authentication failed" in err or "AuthenticationFailed" in err:
+            logger.warning("mongo_sync: hint — wrong username or password in MONGODB_URL")
+        elif "timed out" in err.lower() or "ServerSelectionTimeoutError" in err:
+            logger.warning(
+                "mongo_sync: hint — connection timed out. "
+                "Most likely cause: your MongoDB Atlas cluster has IP Access List restrictions. "
+                "Go to Atlas → Network Access → Add IP Address → Allow access from anywhere (0.0.0.0/0)"
+            )
+        elif "SSL" in err or "ssl" in err:
+            logger.warning("mongo_sync: hint — SSL/TLS error. Check if your cluster requires TLS.")
         return False
 
 
