@@ -1223,58 +1223,72 @@ async def nav_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
     elif action == "changepw":
         cost = _TOKEN_COSTS["changepw"]
+        chat_id = query.message.chat_id
         # Admin: free, start immediately
         if is_admin(uid):
             _start_changepw_flow(uid)
             await context.bot.send_message(
-                chat_id=query.message.chat_id,
+                chat_id=chat_id,
                 text=(
                     "🔐 <b>Change Password</b>  <i>[BETA]</i>\n"
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    "⚠️ <b>Warning:</b> This will permanently change the account's Netflix password.\n\n"
+                    "⚠️ <b>Warning:</b> This will permanently change the account's Netflix password.\n"
+                    "Only use this on accounts you own or have explicit permission to modify.\n\n"
                     "Send /cancel at any time to abort.\n\n"
-                    "Step 1 of 3 — Enter the <b>NetflixId</b> cookie value:"
+                    "Step 1 of 3 — Enter the <b>NetflixId</b> cookie value for the account:\n"
+                    "<i>(the raw NetflixId string from the cookie)</i>"
                 ),
                 parse_mode=ParseMode.HTML,
             )
             return
         # Already in a flow
         if uid in _CHANGEPW_STATE:
-            await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text="🔐 You have an active Change Password session. Continue, or /cancel to abort.",
-                parse_mode=ParseMode.HTML,
-            )
+            step = _CHANGEPW_STATE[uid].get("step", "")
+            if step == "confirm_pending":
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="🔐 <b>Confirmation pending</b>\n\nPlease tap <b>Confirm</b> or <b>Cancel</b> on the previous message.",
+                    parse_mode=ParseMode.HTML,
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="🔐 <b>Session in progress</b>\n\nYou have an active Change Password session. Continue, or /cancel to abort.",
+                    parse_mode=ParseMode.HTML,
+                )
             return
         # Check balance
         balance = user_store.get_balance(uid)
         if balance < cost:
             await context.bot.send_message(
-                chat_id=query.message.chat_id,
+                chat_id=chat_id,
                 text=(
                     f"🔐 <b>Change Password</b>  <i>[BETA]</i>\n\n"
                     f"This feature costs <b>{cost} 🪙 tokens</b> per use.\n"
                     f"Your balance: <b>{balance} 🪙</b>\n\n"
-                    "💰 /buy — Get tokens"
+                    "💰 /buy — Get tokens\n"
+                    "👤 /account — View your balance"
                 ),
                 parse_mode=ParseMode.HTML,
             )
             return
-        # Show confirmation (same as changepw_command for non-admins)
+        # Show confirmation — identical to /changepw command
         _CHANGEPW_STATE[uid] = {"step": "confirm_pending"}
         await context.bot.send_message(
-            chat_id=query.message.chat_id,
+            chat_id=chat_id,
             text=(
                 f"🔐 <b>Change Password</b>  <i>[BETA]</i>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"⚠️ This will permanently change the Netflix account's password.\n\n"
-                f"<b>Cost:</b> {cost} 🪙 tokens  |  <b>Balance:</b> {balance} 🪙\n\n"
-                f"Tap <b>Confirm</b> to proceed:"
+                f"This will cost <b>{cost} 🪙 tokens</b>.\n"
+                f"Your current balance: <b>{balance} 🪙</b>\n\n"
+                "⚠️ <b>Warning:</b> This permanently changes the Netflix account's password.\n"
+                "Only use on accounts you own or have explicit permission to modify.\n\n"
+                "Do you want to proceed?"
             ),
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Confirm", callback_data=f"changepw_confirm:yes"),
-                InlineKeyboardButton("❌ Cancel",  callback_data=f"changepw_confirm:no"),
+                InlineKeyboardButton(f"✅ Confirm ({cost} 🪙)", callback_data=f"changepw_confirm:{uid}:yes"),
+                InlineKeyboardButton("❌ Cancel",               callback_data=f"changepw_confirm:{uid}:no"),
             ]]),
         )
 
