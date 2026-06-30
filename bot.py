@@ -1817,29 +1817,45 @@ async def _handle_proxy_txt_upload(update: Update, uid: int, for_admin: bool) ->
             await prog.edit_text("⚠️ No proxy lines found in the file.", parse_mode=ParseMode.HTML)
             return
 
-        added = skipped = 0
-        err_samples: list[str] = []
+        loop = asyncio.get_running_loop()
         if for_admin:
             from proxy_manager import proxy_manager as _pm
-            for p in proxies:
-                ok, result = _pm.add_proxy_raw(p)
-                if ok:
-                    added += 1
-                else:
-                    skipped += 1
-                    if len(err_samples) < 3:
-                        err_samples.append(f"<code>{p[:40]}</code>: {result}")
-            total_note = f"\n📡 Pool total: <b>{_pm.count}</b>"
+
+            def _do_admin_import():
+                _added = _skipped = 0
+                _errs: list[str] = []
+                for p in proxies:
+                    ok, result = _pm.add_proxy_raw(p)
+                    if ok:
+                        _added += 1
+                    else:
+                        _skipped += 1
+                        if len(_errs) < 3:
+                            _errs.append(f"<code>{p[:40]}</code>: {result}")
+                return _added, _skipped, _errs, _pm.count
+
+            added, skipped, err_samples, pool_total = await loop.run_in_executor(
+                _EXECUTOR, _do_admin_import
+            )
+            total_note = f"\n📡 Pool total: <b>{pool_total}</b>"
         else:
-            for p in proxies:
-                ok, result = user_store.add_user_proxy(uid, p)
-                if ok:
-                    added += 1
-                else:
-                    skipped += 1
-                    if len(err_samples) < 3:
-                        err_samples.append(f"<code>{p[:40]}</code>: {result}")
-            total_note = f"\n📡 Your total: <b>{user_store.count_user_proxies(uid)}</b>"
+            def _do_user_import():
+                _added = _skipped = 0
+                _errs: list[str] = []
+                for p in proxies:
+                    ok, result = user_store.add_user_proxy(uid, p)
+                    if ok:
+                        _added += 1
+                    else:
+                        _skipped += 1
+                        if len(_errs) < 3:
+                            _errs.append(f"<code>{p[:40]}</code>: {result}")
+                return _added, _skipped, _errs, user_store.count_user_proxies(uid)
+
+            added, skipped, err_samples, user_total = await loop.run_in_executor(
+                _EXECUTOR, _do_user_import
+            )
+            total_note = f"\n📡 Your total: <b>{user_total}</b>"
 
         err_note = ("\n⚠️ Sample errors:\n" + "\n".join(err_samples)) if err_samples else ""
         await prog.edit_text(
@@ -3327,7 +3343,10 @@ async def proxy_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             await query.answer("No sources saved yet.", show_alert=True)
             return
         await query.message.reply_text("⏳ Fetching proxies from saved sources…")
-        added, skipped, errors = pm.refresh_all_sources()
+        loop = asyncio.get_running_loop()
+        added, skipped, errors = await loop.run_in_executor(
+            _EXECUTOR, pm.refresh_all_sources
+        )
         err_text = ("\n⚠️ Errors:\n" + "\n".join(errors)) if errors else ""
         await query.message.reply_text(
             f"✅ <b>Re-fetch complete</b>\n\n"
@@ -3512,9 +3531,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 parse_mode=ParseMode.HTML,
             )
             return
-        # Immediately fetch it
+        # Immediately fetch it (run in executor so event loop stays free)
         await update.message.reply_text("⏳ Fetching proxies from URL…")
-        added, skipped, err = pm.fetch_from_url(src_url)
+        loop = asyncio.get_running_loop()
+        added, skipped, err = await loop.run_in_executor(
+            _EXECUTOR, lambda: pm.fetch_from_url(src_url)
+        )
         if err:
             await update.message.reply_text(
                 f"⚠️ <b>Could not fetch:</b> {err}\n\n"
