@@ -3444,6 +3444,205 @@ async def welcomebonus_command(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
 
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin: show admin control panel."""
+    uid = update.effective_user.id if update.effective_user else 0
+    if not is_admin(uid):
+        await update.message.reply_text("⛔ <b>Admin only.</b>", parse_mode=ParseMode.HTML)
+        return
+    await _send_admin_panel(update.message.chat_id, context)
+
+
+async def _send_admin_panel(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send the admin control panel message with inline buttons."""
+    total_users = len(user_store.get_all_user_ids())
+    bonus_status = "🟢 ON" if user_store.welcome_bonus_enabled() else "🔴 OFF"
+    bonus_amount = user_store.welcome_bonus_amount()
+    coupons = user_store.list_coupons()
+    active_coupons = sum(1 for c in coupons if c["active"])
+
+    text = (
+        "🛠️ <b>Admin Control Panel</b>\n\n"
+        f"👥 Total users: <b>{total_users}</b>\n"
+        f"🎁 Welcome bonus: <b>{bonus_status}</b> ({bonus_amount} tokens)\n"
+        f"🎟️ Active coupons: <b>{active_coupons}</b>\n\n"
+        "Choose an action:"
+    )
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📢 Broadcast",      callback_data="admin:broadcast"),
+            InlineKeyboardButton("👥 User List",       callback_data="admin:userlist"),
+        ],
+        [
+            InlineKeyboardButton("🎟️ Add Coupon",     callback_data="admin:addcoupon"),
+            InlineKeyboardButton("🗑️ Del Coupon",     callback_data="admin:delcoupon"),
+        ],
+        [
+            InlineKeyboardButton("📋 List Coupons",   callback_data="admin:listcoupons"),
+            InlineKeyboardButton("🎁 Welcome Bonus",  callback_data="admin:welcomebonus"),
+        ],
+        [
+            InlineKeyboardButton("🪙 Give Token",     callback_data="admin:givetoken"),
+            InlineKeyboardButton("💾 Backup",          callback_data="admin:backup"),
+        ],
+        [
+            InlineKeyboardButton("📊 User Status",    callback_data="admin:userstatus"),
+            InlineKeyboardButton("🔄 Refresh",         callback_data="admin:refresh"),
+        ],
+    ])
+    await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+
+async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle admin panel button presses."""
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id if query.from_user else 0
+    if not is_admin(uid):
+        await query.answer("⛔ Admin only.", show_alert=True)
+        return
+
+    action = query.data.split(":")[1]
+    chat_id = query.message.chat_id
+
+    if action == "refresh":
+        await query.message.delete()
+        await _send_admin_panel(chat_id, context)
+
+    elif action == "broadcast":
+        _BROADCAST_PENDING.add(uid)
+        total = len(user_store.get_all_user_ids())
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"📢 <b>Broadcast</b>\n\n"
+                f"Will be sent to <b>{total}</b> users.\n"
+                f"Send the message now (text / photo / video):\n\n"
+                f"/cancel to abort."
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+
+    elif action == "userlist":
+        # Re-use existing userlist logic
+        users = user_store.get_all_user_ids()
+        if not users:
+            await context.bot.send_message(chat_id=chat_id, text="No users yet.", parse_mode=ParseMode.HTML)
+            return
+        lines = [f"{u}" for u in users]
+        content = "\n".join(lines).encode()
+        import io
+        bio = io.BytesIO(content)
+        bio.name = "userlist.txt"
+        await context.bot.send_document(
+            chat_id=chat_id,
+            document=bio,
+            caption=f"👥 <b>{len(users)} users</b>",
+            parse_mode=ParseMode.HTML,
+        )
+
+    elif action == "addcoupon":
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "🎟️ <b>Add Coupon</b>\n\n"
+                "Send command:\n"
+                "<code>/addcoupon CODE TOKENS [max_uses]</code>\n\n"
+                "Examples:\n"
+                "<code>/addcoupon WELCOME500 500</code>  — 1 use\n"
+                "<code>/addcoupon PROMO100 100 50</code> — 50 uses\n"
+                "<code>/addcoupon FREE50 50 -1</code>    — unlimited"
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+
+    elif action == "delcoupon":
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "🗑️ <b>Delete Coupon</b>\n\n"
+                "Send command:\n"
+                "<code>/delcoupon CODE</code>"
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+
+    elif action == "listcoupons":
+        coupons = user_store.list_coupons()
+        if not coupons:
+            await context.bot.send_message(chat_id=chat_id, text="📋 No coupons yet.", parse_mode=ParseMode.HTML)
+            return
+        lines = ["🎟️ <b>Active Coupons</b>\n"]
+        for c in coupons:
+            uses_label = "∞" if c["max_uses"] == -1 else f"{c['used_count']}/{c['max_uses']}"
+            status = "✅" if c["active"] else "❌"
+            lines.append(f"{status} <code>{c['code']}</code> — <b>{c['token_amount']} tokens</b> — used: {uses_label}")
+        await context.bot.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode=ParseMode.HTML)
+
+    elif action == "welcomebonus":
+        enabled = user_store.welcome_bonus_enabled()
+        amount = user_store.welcome_bonus_amount()
+        status = "🟢 ON" if enabled else "🔴 OFF"
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"🎁 <b>Welcome Bonus</b>\n\n"
+                f"Status: <b>{status}</b>\n"
+                f"Amount: <b>{amount} tokens</b>\n\n"
+                f"Commands:\n"
+                f"  <code>/welcomebonus on [amount]</code> — enable\n"
+                f"  <code>/welcomebonus off</code> — disable"
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+
+    elif action == "givetoken":
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "🪙 <b>Give Tokens</b>\n\n"
+                "Send command:\n"
+                "<code>/givetoken USER_ID AMOUNT [reason]</code>\n\n"
+                "Example:\n"
+                "<code>/givetoken 123456789 100 promo</code>"
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+
+    elif action == "backup":
+        import glob as _glob
+        db_files = _glob.glob("*.db") + _glob.glob("*.sqlite")
+        if not db_files:
+            await context.bot.send_message(chat_id=chat_id, text="❌ No DB file found.", parse_mode=ParseMode.HTML)
+            return
+        for db_path in db_files:
+            with open(db_path, "rb") as f:
+                await context.bot.send_document(
+                    chat_id=chat_id,
+                    document=f,
+                    filename=db_path,
+                    caption=f"💾 <b>Backup:</b> <code>{db_path}</code>",
+                    parse_mode=ParseMode.HTML,
+                )
+
+    elif action == "userstatus":
+        balances = user_store.get_all_balances()
+        total = len(balances)
+        total_tokens = sum(b["balance"] for b in balances)
+        rich = sum(1 for b in balances if b["balance"] >= 100)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"📊 <b>User Status</b>\n\n"
+                f"👥 Total users: <b>{total}</b>\n"
+                f"🪙 Total tokens held: <b>{total_tokens}</b>\n"
+                f"💎 Users with 100+ tokens: <b>{rich}</b>\n\n"
+                f"Use <code>/userstatus USER_ID</code> for individual stats."
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+
+
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin: broadcast a message to all registered users."""
     uid = update.effective_user.id if update.effective_user else 0
@@ -4523,6 +4722,7 @@ def main() -> None:
     app.add_handler(CommandHandler("userstatus",  userstatus_command))
     app.add_handler(CommandHandler("backup",      backup_command))
     app.add_handler(CommandHandler("setqr",       setqr_command))
+    app.add_handler(CommandHandler("admin",        admin_command))
     app.add_handler(CommandHandler("broadcast",   broadcast_command))
     app.add_handler(CommandHandler("redeem",      redeem_command))
     app.add_handler(CommandHandler("addcoupon",   addcoupon_command))
@@ -4531,6 +4731,7 @@ def main() -> None:
     app.add_handler(CommandHandler("welcomebonus",welcomebonus_command))
 
     # ── Inline button callbacks ───────────────────────────────────────────
+    app.add_handler(CallbackQueryHandler(admin_callback,           pattern=r"^admin:"))
     app.add_handler(CallbackQueryHandler(nav_callback,             pattern=r"^nav:"))
     app.add_handler(CallbackQueryHandler(account_refresh_callback, pattern=r"^account:refresh$"))
     app.add_handler(CallbackQueryHandler(changepw_confirm_callback, pattern=r"^changepw_confirm:"))
